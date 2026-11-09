@@ -14,10 +14,14 @@ final class Agent: @unchecked Sendable {
     private var watched: [String] = []
     private var timer: DispatchSourceTimer?
     private var pending = false
+    // Junk events gathered during the debounce; a mount or dropped-events flag forces a full scan.
+    private var dirty = Set<String>()
+    private var needsFullScan = false
     // Filter inputs for events, refreshed by every reconcile.
     private var ruleNames: Set<String> = []
     private var roots: [String] = []
     private var excluded: [String] = []
+    private var maxDepth = 0
 
     private static let debounce: TimeInterval = 2
     private static let hourly: TimeInterval = 3600
@@ -53,14 +57,19 @@ final class Agent: @unchecked Sendable {
         exit(0)
     }
 
-    private func reconcileNow(reason: String) {
+    /// `only` limits the scan (and so any pruning) to those folders, walked `maxDepth` deep;
+    /// nil scans every root.
+    private func reconcileNow(reason: String, only: (roots: [String], maxDepth: Int)? = nil) {
         do {
             let config = try Config.load(from: Paths.config, home: Paths.home)
+            var scoped = config
+            if let only { (scoped.roots, scoped.maxDepth) = only }
             let state = try State.load(from: Paths.state)
-            let (outcome, next) = try reconcile(config: config, state: state, store: store, dryRun: false)
+            let (outcome, next) = try reconcile(config: scoped, state: state, store: store, dryRun: false)
             if next != state { try next.save(to: Paths.state) }
             ruleNames = Set(config.rules.map(\.name))
-            roots = outcome.scannedRoots
+            maxDepth = config.maxDepth
+            if only == nil { roots = outcome.scannedRoots }
             excluded = outcome.excluded
             watch(watchRoots(for: config.roots))
             report(outcome, reason: reason)
@@ -80,13 +89,21 @@ final class Agent: @unchecked Sendable {
 
     fileprivate func handle(paths: [String], flags: [UInt32]) {
         dispatchPrecondition(condition: .onQueue(queue))
-        let relevant = flags.contains { $0 & Self.triggerFlags != 0 }
-            || paths.contains { isJunkEvent($0, ruleNames: ruleNames, roots: roots, excluded: excluded) }
-        guard relevant, !pending else { return }
+        if flags.contains(where: { $0 & Self.triggerFlags != 0 }) { needsFullScan = true }
+        dirty.formUnion(paths.filter { isJunkEvent($0, ruleNames: ruleNames, roots: roots, excluded: excluded) })
+        guard needsFullScan || !dirty.isEmpty, !pending else { return }
         pending = true
         queue.asyncAfter(deadline: .now() + Self.debounce) { [unowned self] in
+            let full = needsFullScan
+            let targets = rescanRoots(for: Array(dirty), ruleNames: ruleNames, roots: roots, maxDepth: maxDepth)
             pending = false
-            reconcileNow(reason: "change")
+            dirty = []
+            needsFullScan = false
+            if full { return reconcileNow(reason: "change") }
+            // One pass per remaining depth; events a full walk never reaches leave nothing to do.
+            for (depth, dirs) in Dictionary(grouping: targets.keys, by: { targets[$0]! }).sorted(by: { $0.key < $1.key }) {
+                reconcileNow(reason: "change", only: (dirs.sorted(), depth))
+            }
         }
     }
 

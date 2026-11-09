@@ -237,3 +237,28 @@ public func isJunkEvent(_ path: String, ruleNames: Set<String>, roots: [String],
           trimmed.split(separator: "/").contains(where: { ruleNames.contains(String($0)) }) else { return false }
     return !excluded.contains { isWithin(trimmed, $0) }
 }
+
+/// The folders a change-triggered reconcile has to rescan, each mapped to the depth a full walk would
+/// still have left there. For each event: the folder holding its first junk-named component (where
+/// that folder's sentinels live), nested results collapsed. Rescanning only these instead of every
+/// root keeps a busy `npm install` from costing a full scan per event batch.
+/// A scoped pass must find exactly what a full pass finds, or the next full pass prunes what it added
+/// and the two flip-flop. So folders a full walk never reaches (below a dot, `.noindex` or package
+/// folder, or deeper than `maxDepth`) are dropped, and the rest get only the remaining depth.
+public func rescanRoots(for paths: [String], ruleNames: Set<String>, roots: [String], maxDepth: Int) -> [String: Int] {
+    var dirs: [String: Int] = [:]
+    for path in paths {
+        let trimmed = path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
+        guard let root = roots.filter({ isWithin(trimmed, $0) }).max(by: { $0.count < $1.count }) else { continue }
+        var dir = root, depth = 0, reachable = true
+        for part in trimmed.dropFirst(root.count).split(separator: "/").map(String.init) {
+            if ruleNames.contains(part) { break }
+            dir = (dir as NSString).appendingPathComponent(part)
+            depth += 1
+            let isPackage = (try? URL(fileURLWithPath: dir).resourceValues(forKeys: [.isPackageKey]))?.isPackage == true
+            if part.hasPrefix(".") || part.hasSuffix(".noindex") || isPackage { reachable = false; break }
+        }
+        if reachable && depth < maxDepth { dirs[dir] = maxDepth - depth }
+    }
+    return dirs.filter { dir, _ in !dirs.keys.contains { $0 != dir && isWithin(dir, $0) } }
+}

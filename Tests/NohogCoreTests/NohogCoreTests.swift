@@ -344,6 +344,59 @@ extension ReconcileTests {
         #expect(!isJunkEvent("/dev/app/node_modules/pkg/", ruleNames: rules, roots: roots, excluded: ["/dev/app/node_modules"]))
     }
 
+    @Test func rescanOnlyTheProjectsThatChanged() {
+        let roots = ["/dev", "/dev/nested-root"]
+        let paths = [
+            "/dev/app/node_modules/pkg/",               // → /dev/app, 1 below the root
+            "/dev/app/packages/ui/node_modules/x/",     // nested in /dev/app, collapsed
+            "/dev/rust/target/debug/",                  // → /dev/rust
+            "/dev/nested-root/svc/node_modules/",       // longest matching root wins → /dev/nested-root/svc
+            "/dev/node_modules/",                       // junk right under the root → the root
+            "/elsewhere/node_modules/",                 // outside every root, ignored
+        ]
+        #expect(rescanRoots(for: paths, ruleNames: rules, roots: roots, maxDepth: 8) == ["/dev": 8])
+        #expect(rescanRoots(for: Array(paths.dropLast(2)), ruleNames: rules, roots: roots, maxDepth: 8)
+            == ["/dev/app": 7, "/dev/nested-root/svc": 7, "/dev/rust": 7])
+    }
+
+    @Test func rescanSkipsWhatAFullWalkNeverReaches() {
+        let paths = [
+            "/dev/a/b/node_modules/x/",                 // 2 below the root: 1 level left
+            "/dev/a/b/c/node_modules/x/",               // 3 below: beyond maxDepth
+            "/dev/a/.cache/node_modules/x/",            // under a dot folder
+            "/dev/a/out.noindex/node_modules/x/",       // under a .noindex folder
+        ]
+        #expect(rescanRoots(for: paths, ruleNames: rules, roots: ["/dev"], maxDepth: 3) == ["/dev/a/b": 1])
+    }
+
+    @Test func scopedScanFindsExactlyWhatAFullScanFinds() throws {
+        // A scoped pass that found more than a full pass would be pruned by the next full pass, and
+        // re-added by the next event: an endless exclude/include flip-flop.
+        let fx = try Fixture(["a/package.json", "a/node_modules/", "a/b/c/package.json", "a/b/c/node_modules/"])
+        let scanner = JunkScanner(rules: Rule.defaults, skipPaths: [], maxDepth: 3)
+        let full = scanner.scan(roots: [fx.root]).found
+        let events = [fx.path("a/node_modules/x"), fx.path("a/b/c/node_modules/x")]
+        var scoped: [String] = []
+        for (dir, depth) in rescanRoots(for: events, ruleNames: rules, roots: [fx.root], maxDepth: 3) {
+            scoped += JunkScanner(rules: Rule.defaults, skipPaths: [], maxDepth: depth).scan(roots: [dir]).found
+        }
+        #expect(full == [fx.path("a/node_modules")]) // a/b/c/node_modules is 4 deep, past maxDepth
+        #expect(scoped.sorted() == full)
+    }
+
+    @Test func rescanRootsSupportPruningOnlyWhatWasRescanned() throws {
+        let fx = try Fixture(["a/package.json", "a/node_modules/", "b/package.json"])
+        var config = Config.defaults(home: "/nonexistent")
+        config.extraPaths = []
+        let targets = rescanRoots(for: [fx.path("a/node_modules/x")], ruleNames: rules, roots: [fx.root], maxDepth: 8)
+        config.roots = Array(targets.keys)
+        // b's node_modules is gone, but b was not rescanned, so its managed entry must survive.
+        let store = FakeStore([fx.path("b/node_modules")])
+        let (outcome, state) = try reconcile(config: config, state: State(managed: [fx.path("b/node_modules")]), store: store, dryRun: false)
+        #expect(outcome.plan == Plan(add: [fx.path("a/node_modules")], remove: []))
+        #expect(state.managed == [fx.path("a/node_modules"), fx.path("b/node_modules")])
+    }
+
     @Test func watchRootsUseLiteralPrefixAndDropNested() throws {
         let fx = try Fixture(["vols/A/Developer/", "home/"])
         try FileManager.default.createSymbolicLink(atPath: fx.path("home/Developer"), withDestinationPath: fx.path("vols/A/Developer"))
