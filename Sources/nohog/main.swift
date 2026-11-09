@@ -14,6 +14,7 @@ usage: nohog <command>
   status [--count]           Spotlight exclusions, marked [nohog] or [yours] (with file counts)
   scan [--count] [root...]   list dev junk folders (default: configured roots)
   reconcile [--dry-run]      exclude junk folders now / show what would change
+  purge [path...]            drop content indexed before a folder was excluded (default: whole list)
   selftest                   prove Spotlight honors exclusions on this macOS (~10-35s)
   bench [files]              measure Spotlight CPU with vs without an exclusion (~2-4 min)
   top [seconds] [--depth N]  which folders Spotlight is reading right now (needs sudo)
@@ -82,6 +83,20 @@ func reconcileCommand(_ args: [String], config: Config, store: ExclusionStore) t
     if !failed.isEmpty { fail("Spotlight did not apply:\n  " + failed.joined(separator: "\n  ")) }
 }
 
+func purgeCommand(_ args: [String], store: ExclusionStore) throws {
+    let listed = try store.list()
+    let paths = args.isEmpty ? listed.sorted() : args.map(canonicalPath)
+    let unlisted = paths.filter { !listed.contains($0) }
+    if !unlisted.isEmpty { fail("not excluded, so nothing to purge:\n  " + unlisted.joined(separator: "\n  ")) }
+    print("checking \(paths.count) exclusions for content indexed before they were added…")
+    let results = try purgeStale(paths: paths, store: store, indexed: indexedCount, progress: { result in
+        print(String(format: "%9d -> %-7d %@", result.before, result.after, result.path))
+    })
+    let stale = results.filter { $0.after > 0 }
+    print("purged \(results.count - stale.count) of \(results.count) folders that still had indexed content")
+    if !stale.isEmpty { fail("still indexed (Spotlight busy? run `nohog purge` again later):\n  " + stale.map(\.path).joined(separator: "\n  ")) }
+}
+
 let args = Array(CommandLine.arguments.dropFirst())
 guard let command = args.first else { print(usage); exit(0) }
 let rest = Array(args.dropFirst())
@@ -99,6 +114,8 @@ do {
         try status(rest, store: try SpotlightExclusionStore(), state: try State.load(from: Paths.state))
     case "reconcile":
         try reconcileCommand(rest, config: try Config.load(from: Paths.config, home: Paths.home), store: try SpotlightExclusionStore())
+    case "purge":
+        try purgeCommand(rest, store: try SpotlightExclusionStore())
     case "selftest":
         print("checking (up to ~35s)…")
         let result = selftest(store: try SpotlightExclusionStore())

@@ -112,7 +112,7 @@ Something that hogs Spotlight but isn't on this list? Run `sudo nohog top` to fi
 
 - **The exclusion list:** nohog writes to the same **Search Privacy** list as System Settings, using the private `_MDSetExclusion` / `_MDCopyExclusionList` calls in Metadata.framework.
   - Changes apply immediately, and content that was already indexed is purged.
-  - On current macOS, editing `VolumeConfiguration.plist` and `.metadata_never_index` files have no effect.
+  - On current macOS, `.metadata_never_index` files have no effect. Editing `VolumeConfiguration.plist` (as older scripts and dotfiles do) blocks new files once mds restarts, but never purges what was already indexed: run `nohog purge` to fix folders excluded that way.
 - **The background agent reconciles:**
   - at login, which covers the reboot after a macOS update;
   - within ~3 s of a junk folder appearing (FSEvents);
@@ -133,6 +133,7 @@ nohog install / uninstall              start the agent / stop it and remove ever
 nohog status [--count]                 exclusions marked [nohog] or [yours] (with file counts), and whether the agent runs
 nohog scan [--count] [root...]         list junk folders (with file counts)
 nohog reconcile [--dry-run]            apply now / preview
+nohog purge [path...]                  re-send exclusions whose old content is still indexed (default: whole list)
 nohog selftest                         prove exclusions work on this macOS (10-35 s); prints a shareable result
 nohog bench [files]                    measure Spotlight CPU with vs without an exclusion (default 20,000 files)
 sudo nohog top [seconds] [--depth N]   which folders Spotlight is reading right now

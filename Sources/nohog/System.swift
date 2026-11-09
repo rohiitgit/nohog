@@ -71,6 +71,19 @@ func selftest(store: ExclusionStore) -> SelftestResult {
     }
 }
 
+/// Items Spotlight still has indexed below `path`. Scoped to an excluded folder itself, mdfind reports
+/// 0 even while its old content is still indexed, so this queries the parent and filters by prefix.
+/// `kMDItemFSName == "*"` matches nothing; every item's content-type tree includes public.item.
+/// mdfind prints firmlinked paths (`/Users/…`), so a `/System/Volumes/Data/…` entry is mapped first.
+func indexedCount(_ path: String) -> Int {
+    let data = "/System/Volumes/Data"
+    let path = path.hasPrefix(data + "/") ? String(path.dropFirst(data.count)) : path
+    let prefix = path + "/"
+    let parent = (path as NSString).deletingLastPathComponent
+    return run("/usr/bin/mdfind", ["-onlyin", parent, "kMDItemContentTypeTree == \"public.item\""]).output
+        .split(separator: "\n").filter { $0.hasPrefix(prefix) }.count
+}
+
 func selftestIfNeeded(store: ExclusionStore) -> SelftestResult? {
     selftestIfNeeded(stateURL: Paths.state, build: osBuild()) { selftest(store: store) }
 }

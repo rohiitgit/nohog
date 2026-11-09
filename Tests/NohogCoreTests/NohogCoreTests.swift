@@ -521,3 +521,54 @@ extension ReconcileTests {
         #expect(benchFileContents(index: 7, token: "t") != benchFileContents(index: 8, token: "t"))
     }
 }
+
+/// Privacy list plus the index: re-sending a listed path purges it unless mds drops the request.
+final class FakeIndex: ExclusionStore {
+    var listed: [String]
+    var indexed: [String: Int]
+    var drops = 0
+    var calls = 0
+
+    init(_ indexed: [String: Int]) {
+        self.indexed = indexed
+        self.listed = indexed.keys.sorted()
+    }
+
+    func list() throws -> [String] { listed }
+
+    func setExcluded(_ path: String, _ excluded: Bool) throws {
+        calls += 1
+        if drops > 0 { drops -= 1; return }
+        if excluded { indexed[path] = 0 }
+    }
+}
+
+@Suite struct PurgeTests {
+    @Test func purgesOnlyStaleEntriesAndLeavesTheListAlone() throws {
+        let index = FakeIndex(["/a": 12, "/b": 0])
+        let results = try purgeStale(paths: ["/a", "/b"], store: index, indexed: { index.indexed[$0]! }, wait: { _ in })
+        #expect(results == [PurgeResult(path: "/a", before: 12, after: 0)])
+        #expect(index.calls == 1) // "/b" had nothing indexed, so it is never re-sent
+        #expect(index.listed == ["/a", "/b"])
+    }
+
+    @Test func reissuesWhenSpotlightDropsTheRequest() throws {
+        let index = FakeIndex(["/a": 7])
+        index.drops = 1
+        var waits: [TimeInterval] = []
+        let results = try purgeStale(paths: ["/a"], store: index, indexed: { index.indexed[$0]! }, settle: 5, polls: 2, wait: { waits.append($0) })
+        #expect(results == [PurgeResult(path: "/a", before: 7, after: 0)])
+        #expect(waits == [0, 5, 5, 1, 5]) // two polls on the dropped request, then backoff and a re-send
+        #expect(index.calls == 2)
+    }
+
+    @Test func reportsWhatStaysIndexed() throws {
+        let index = FakeIndex(["/a": 7])
+        index.drops = 99
+        var reported: [PurgeResult] = []
+        let results = try purgeStale(paths: ["/a"], store: index, indexed: { index.indexed[$0]! }, polls: 1, wait: { _ in }, progress: { reported.append($0) })
+        #expect(results == [PurgeResult(path: "/a", before: 7, after: 7)])
+        #expect(reported == results)
+        #expect(index.calls == 5) // one per backoff step, then it gives up
+    }
+}
